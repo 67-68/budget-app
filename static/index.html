@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>Budget</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>budget</span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="input">输入</button>
+      <button class="tab" data-tab="overview">总览</button>
+      <button class="tab" data-tab="browse">浏览</button>
+    </nav>
+    <div class="today" id="todayLabel"></div>
+  </header>
+
+  <main>
+    <!-- ============================ INPUT ============================ -->
+    <section class="view active" id="view-input">
+      <div class="input-stage">
+        <div class="prompt-line">
+          <span class="prompt-sign">›</span>
+          <input id="cmdInput" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="35 午饭 #餐饮 @同事">
+        </div>
+        <div class="hint-row" id="hintRow">
+          <span class="kbd-hint"><b>b</b> 预算</span>
+          <span class="kbd-hint"><b>p</b> 模板</span>
+          <span class="kbd-hint"><b>昨天</b> 改日期</span>
+          <span class="kbd-hint"><b>#</b> 分类</span>
+          <span class="kbd-hint"><b>@</b> 标签</span>
+          <span class="kbd-hint"><b>?</b> 帮助</span>
+        </div>
+        <div class="feedback" id="feedback"></div>
+        <div class="quick" id="quickProfiles"></div>
+      </div>
+    </section>
+
+    <!-- =========================== OVERVIEW ========================== -->
+    <section class="view" id="view-overview">
+      <div class="date-bar">
+        <button class="icon-btn" id="ovPrev">‹</button>
+        <div class="date-display">
+          <span id="ovDate"></span>
+          <button class="link-btn" id="ovToday">回到今天</button>
+        </div>
+        <button class="icon-btn" id="ovNext">›</button>
+      </div>
+
+      <div class="stat-row">
+        <div class="stat">
+          <div class="stat-label">当天支出</div>
+          <div class="stat-value" id="ovTotal">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">预算计划</div>
+          <div class="stat-value muted" id="ovPlanned">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">笔数</div>
+          <div class="stat-value muted" id="ovCount">—</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>分类分布</h2></div>
+        <div class="bars" id="ovBars"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>今日计划</h2></div>
+        <ul class="plain-list" id="ovPlannedList"></ul>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>本月报表</h2>
+          <input type="month" id="reportMonth" class="month-input">
+        </div>
+        <div class="report-summary" id="reportSummary"></div>
+        <div class="report-budgets" id="reportBudgets"></div>
+        <div class="report-cats" id="reportCats"></div>
+      </div>
+    </section>
+
+    <!-- ============================ BROWSE =========================== -->
+    <section class="view" id="view-browse">
+      <div class="date-bar">
+        <button class="icon-btn" id="brPrev">‹</button>
+        <div class="date-display">
+          <span id="brDate"></span>
+          <button class="link-btn" id="brToday">回到今天</button>
+        </div>
+        <button class="icon-btn" id="brNext">›</button>
+      </div>
+
+      <div class="browse-grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>当天记录</h2>
+            <span class="count-badge" id="brCount">0</span>
+          </div>
+          <ul class="record-list" id="brRecords"></ul>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>行动模板</h2></div>
+          <ul class="plain-list" id="brProfiles"></ul>
+          <form class="mini-form" id="profileForm">
+            <input name="name" placeholder="模板名，如 咖啡" required>
+            <div class="mini-row">
+              <input name="default_amount" type="number" step="0.01" min="0" placeholder="默认金额">
+              <input name="default_time" type="time" placeholder="默认时间">
+            </div>
+            <div class="mini-row">
+              <input name="category" placeholder="分类，如 餐饮">
+              <input name="default_tags" placeholder="标签，逗号分隔">
+            </div>
+            <button type="submit">创建模板</button>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
