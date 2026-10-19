@@ -22,20 +22,99 @@ import fmt
 #   month  YYYY-MM used by the report
 #   sel    selected row index in the browse view
 
+# Help content: scenarios, not a command dump. Each entry answers
+#   1. when you would reach for it,
+#   2. the exact command,
+#   3. why the command looks the way it does.
+SCENARIOS = [
+    {
+        "title": "记一笔日常开销",
+        "when": "刚付完钱，想立刻记下来。",
+        "cmds": ["35 午饭 #餐饮 @同事"],
+        "why": "金额打头，因为这是你唯一一定要填的东西；其余按「想到什么写什么」的顺序拼，"
+               "顺序无关。# 是分类，@ 是标签，分类进报表，标签进检索。",
+    },
+    {
+        "title": "补记前几天的账",
+        "when": "昨天忘了记，今天才想起来。",
+        "cmds": ["昨天 42 打车 #交通", "前天 18 早餐", "-3d 60 加油"],
+        "why": "日期词放在最前面。它修饰的是「哪一天」，而不是某一笔的属性，"
+               "所以语法上必须先说清楚语境，后面的数字才不会歧义。",
+    },
+    {
+        "title": "同一笔开销反复发生",
+        "when": "每周三中午都买咖啡，不想每次都敲一遍。",
+        "cmds": ["p 咖啡 18 #餐饮 12:00", "use 咖啡", "use 咖啡 22"],
+        "why": "p 建模板，use 用模板。模板存的是「常量和默认值」，"
+               "use 时还能覆盖金额——因为价格会变，但你不该为此重建模板。",
+    },
+    {
+        "title": "给某类开销定个计划",
+        "when": "想约束每周咖啡花多少、每月房租多少。",
+        "cmds": ["b 50 每周三 12:00 咖啡 #餐饮", "b 1200 每月1号 房租 #生活",
+                 "b 30 每2天 早餐"],
+        "why": "b 后面紧跟金额和周期，标题和分类放最后。周期是自然语言"
+               "（每天/每周三/每2天/每月1号），因为记账时人不该换算成 cron 表达式。",
+    },
+    {
+        "title": "查看某天的花销",
+        "when": "想确认今天/某天花了多少、花在哪。",
+        "cmds": ["day 昨天", "day 2026-10-21", "next", "prev", "today"],
+        "why": "day 跳到指定日期，next/prev 相对移动，today 兜底。"
+               "三个动词分别覆盖「绝对定位」「相对移动」「归位」三种意图，"
+               "比让一个键兼做三件事更不容易按错。",
+    },
+    {
+        "title": "看这个月预算执行得怎么样",
+        "when": "月底了，想知道哪项超支。",
+        "cmds": ["report", "month 2026-09", "next", "prev"],
+        "why": "report 打开报表，next/prev 在报表里自动变成换月——"
+               "同一个键在不同语境下含义随上下文变化，因为「前后」这个意图是稳定的，"
+               "变的是被移动的粒度。",
+    },
+    {
+        "title": "改一条记错的记录",
+        "when": "金额敲错、分类选错、忘了打标签。",
+        "cmds": ["edit 12 42", "note 12 改备注", "cat 12 交通",
+                 "tag 12 +报销 -待定", "tags 12 报销,同事"],
+        "why": "每条命令都是「动词 + id + 新值」，因为修改必须先定位。"
+               "tag 做增量（+/-），tags 做整体替换——两种意图分开，"
+               "避免「我只想加一个标签，结果把其他的冲掉了」。",
+    },
+    {
+        "title": "删掉不要的东西",
+        "when": "重复记录、废弃的预算或模板。",
+        "cmds": ["del 12", "bdel 2", "dprofile 3"],
+        "why": "三个删除动词分开，而不是 del <类型> <id>。"
+               "因为误删的代价不对称——记录删了能补，预算删了整月报表就变了，"
+               "多打几个字母换一次确认是划算的。",
+    },
+    {
+        "title": "在页面之间跳转",
+        "when": "从输入切到总览，或回到浏览页。",
+        "cmds": ["tab", "tab overview", "tab browse", "back"],
+        "why": "tab 不带参数就是循环切页，带参数是直达。"
+               "back 只做一件事：从报表/帮助退回正常视图。",
+    },
+]
+
+# Flat command reference, kept for the TUI's compact key hints.
 VERBS = [
-    # (command, description)
     ("35 午饭 #餐饮 @同事", "记一笔支出"),
     ("昨天 42 打车 #交通", "指定日期记账"),
     ("b 50 每周三 12:00 咖啡 #餐饮", "建预算（周期自定义）"),
     ("b 30 每2天 早餐", "间隔型预算"),
     ("p 咖啡 18 #餐饮 12:00", "建行动模板"),
+    ("use 咖啡 | use 咖啡 20", "用模板记一笔（可覆盖金额）"),
     ("tag 12 +报销 -待定", "改记录标签"),
     ("", ""),
     ("day 昨天 | day 2026-10-21", "跳到某一天"),
     ("next | prev", "前后一天（报表里是月）"),
     ("today | 今天", "回到今天"),
     ("report | 报表", "月度报表"),
+    ("month 2026-09", "指定报表月份"),
     ("tab input|overview|browse", "切换页面"),
+    ("back", "退出报表/帮助"),
     ("edit 12 50", "改记录金额"),
     ("note 12 备注文字", "改记录备注"),
     ("cat 12 餐饮", "改记录分类"),
@@ -173,6 +252,32 @@ def execute(conn, text, state):
         rid = _need_int(args[0])
         rec = actions.update_record(conn, rid, {"category": args[1]})
         return ("ok", "✓ 记录 %s 分类改为 %s" % (rec["id"], rec.get("category_name") or "未分类"))
+
+    if verb in ("use", "用"):
+        if not args:
+            names = ", ".join(p["name"] for p in db.list_profiles(conn)) or "（还没有模板）"
+            raise actions.ActionError("用法：use <模板名> [金额]。可用：" + names)
+        name = args[0]
+        profile = next((p for p in db.list_profiles(conn) if p["name"] == name), None)
+        if not profile:
+            raise actions.ActionError("找不到模板：%s" % name, 404)
+        amount = profile.get("default_amount")
+        if len(args) > 1:
+            try:
+                amount = float(args[1])
+            except ValueError:
+                raise actions.ActionError("金额无效：%s" % args[1])
+        if not amount:
+            raise actions.ActionError("模板「%s」没有默认金额，请补一个：use %s <金额>" % (name, name))
+        rec = actions.create_record(conn, {
+            "date": state["date"],
+            "amount": amount,
+            "note": profile["name"],
+            "category": profile.get("category_name"),
+            "tags": profile.get("default_tags") or [],
+            "time": profile.get("default_time"),
+        })
+        return ("ok", "✓ 用模板记下 %s %s" % (fmt.money(rec["amount"]), rec["note"]))
 
     if verb in ("tags", "标签"):
         if len(args) < 1:

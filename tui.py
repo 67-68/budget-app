@@ -50,7 +50,7 @@ def header(state):
 
 
 HINTS = {
-    0: "直接输入命令 · Tab 换页 · ↑↓ 历史 · Ctrl+H 帮助 · Ctrl+Q 退出",
+    0: "直接输入命令 · Ctrl+字母 执行快捷键 · Tab 换页 · ↑↓ 历史 · Ctrl+Q 退出",
     1: "← → 换日 · Tab 换页 · Ctrl+R 报表 · Ctrl+T 今天 · Ctrl+H 帮助",
     2: "← → 换日 · ↑↓ 选中 · Tab 换页 · Ctrl+E 改金额 · Ctrl+G 标签 · Ctrl+D 删除",
 }
@@ -64,35 +64,31 @@ def footer(state, msg=""):
 
 
 def prompt_line(state):
-    """The always-visible command line."""
+    """The always-visible command line:  budget> <buffer>|"""
     buf = state["buffer"]
     return Text.assemble(
-        ("  › ", "bold cyan"),
-        (buf, "bold" if buf else "grey42"),
-        ("" if buf else "  输入命令，? 看帮助", "grey42"),
+        ("  budget", "bold cyan"),
+        ("> ", "bold cyan"),
+        (buf, "bold"),
+        ("\u258f", "cyan"),
     )
 
 
 def view_input(state, conn):
-    hint = Text()
-    for label in ("b 预算", "p 模板", "day 昨天", "# 分类", "@ 标签", "? 帮助"):
-        hint.append("   %s   " % label, style="dim")
+    hint = Text("  " + "  ".join(("b 预算", "p 模板", "day 昨天",
+                                  "# 分类", "@ 标签", "? 帮助")), style="dim")
+
+    parts = [Text(""), prompt_line(state), Text(""), hint]
+
+    # a single line of the shown day's records, only when there are any
     recent = actions.day_view(conn, state["date"])
-    recent_line = Text()
     if recent["records"]:
-        recent_line.append("  今天 ", style="dim")
+        line = Text("  " + fmt_date(state["date"])[:10] + "  ", style="dim")
         for r in recent["records"][:4]:
-            recent_line.append("%s %s  " % (money(r["amount"]), r["note"] or "—"), style="dim")
-    return Group(
-        Text(""),
-        Text(""),
-        prompt_line(state),
-        Text(""),
-        hint,
-        Text(""),
-        recent_line,
-        Text(""),
-    )
+            line.append("%s %s  " % (money(r["amount"]), r["note"] or "—"), style="dim")
+        parts += [Text(""), line, Text("")]
+
+    return Group(*parts)
 
 
 def view_overview(state, conn):
@@ -170,14 +166,14 @@ def view_browse(state, conn):
         body.append(Text("  这一天还没有记录", style="dim italic"))
 
     if state["profiles"]:
-        p = Text("\n行动模板  ", style="dim")
+        p = Text("行动模板  ", style="dim")
         for prof in state["profiles"]:
             p.append(" %s " % prof["name"], style="cyan")
             if prof.get("default_amount"):
                 p.append(money(prof["default_amount"]) + " ", style="dim")
         body.append(p)
     else:
-        body.append(Text("\n  还没有模板：p 咖啡 18 #餐饮", style="dim italic"))
+        body.append(Text("  还没有模板：p 咖啡 18 #餐饮", style="dim italic"))
 
     return Panel(Group(*body),
                  title="[bold]浏览[/]  " + fmt_date(state["date"]),
@@ -233,23 +229,67 @@ def view_report(state, conn):
                  box=box.ROUNDED, padding=(1, 2))
 
 
-def help_panel():
-    t = Table(box=box.SIMPLE, show_header=False, expand=True)
-    t.add_column("命令", style="cyan", width=34)
-    t.add_column("说明", style="dim")
-    for cmd, desc in HELP_LINES:
-        if not cmd:
-            t.add_row("", "")
-            continue
-        t.add_row(cmd, desc)
-    extra = Text(
-        "\n裸字母只进命令行，不触发动作。快捷键一律用 Ctrl：\n"
-        "  Ctrl+H 帮助   Ctrl+Q 退出   Ctrl+R 报表   Ctrl+T 今天\n"
-        "  Ctrl+E 改金额  Ctrl+G 标签  Ctrl+D 删除  Ctrl+N 新模板\n"
-        "非字母键可直接按：← → ↑ ↓ 换日/选中，Tab 换页，Enter 执行，Esc 返回",
-        style="dim")
-    return Panel(Group(t, extra), title="[bold]帮助[/]",
-                 border_style="cyan", box=box.ROUNDED, padding=(1, 2))
+def _wrap(text, width):
+    """Wrap CJK text by display width, not character count."""
+    import unicodedata
+    lines, cur, w = [], "", 0
+    for ch in text:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > width:
+            lines.append(cur)
+            cur, w = "", 0
+        cur += ch
+        w += cw
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def help_page(state):
+    """Render one screenful of the scenario help."""
+    scen = commands.SCENARIOS
+    per_page = 2
+    pages = max(1, (len(scen) + per_page - 1) // per_page)
+    page = state.get("help_page", 0) % pages
+    chunk = scen[page * per_page:(page + 1) * per_page]
+
+    body = []
+    for item in chunk:
+        head = Text()
+        head.append("  %s\n" % item["title"], style="bold cyan")
+        head.append("    什么时候用  ", style="dim")
+        head.append(item["when"] + "\n", style="")
+        body.append(head)
+
+        for cmd in item["cmds"]:
+            line = Text("    › ", style="bold cyan")
+            line.append(cmd, style="green")
+            body.append(line)
+
+        body.append(Text(""))
+        # "为什么" label sits on the first line, continuation lines align under it
+        label = "为什么  "
+        lines = _wrap(label + item["why"], max(20, console.width - 26))
+        body.append(Text("      " + lines[0], style="dim italic"))
+        for line in lines[1:]:
+            body.append(Text("      " + line, style="dim italic"))
+        body.append(Text(""))
+
+    body.append(Text("  快捷键", style="dim"))
+    for line in [
+        "裸字母只进命令行，不触发动作。修饰键一律用 Ctrl（终端收不到 Cmd）。",
+        "Ctrl+H 帮助   Ctrl+Q 退出   Ctrl+R 报表   Ctrl+T 今天",
+        "Ctrl+E 改金额   Ctrl+G 标签   Ctrl+D 删除",
+        "← → 换日   ↑ ↓ 选中/历史   Tab 换页   Enter 执行   Esc 返回",
+    ]:
+        body.append(Text("    " + line, style="dim"))
+
+    return Panel(
+        Group(*body),
+        title="[bold]帮助[/]  %d/%d" % (page + 1, pages),
+        subtitle="← → 翻页 · 任意其他键返回",
+        border_style="cyan", box=box.ROUNDED, padding=(1, 2),
+    )
 
 
 # -------------------------------------------------------------- rendering
@@ -257,8 +297,7 @@ def render(state, conn):
     console.clear()
     if state["mode"] == "help":
         console.print(header(state))
-        console.print(help_panel())
-        console.print(Text("  任意键返回", style="dim"))
+        console.print(help_page(state))
         return
 
     console.print(header(state))
@@ -331,6 +370,7 @@ def main():
         "message": "",
         "msg_kind": "ok",
         "profiles": [],
+        "help_page": 0,
     }
 
     def refresh():
@@ -358,6 +398,13 @@ def main():
             kind, val = read_key()
 
             if state["mode"] == "help":
+                pages = max(1, (len(commands.SCENARIOS) + 1) // 2)
+                if kind == "left":
+                    state["help_page"] = (state.get("help_page", 0) - 1) % pages
+                    continue
+                if kind == "right":
+                    state["help_page"] = (state.get("help_page", 0) + 1) % pages
+                    continue
                 state["mode"] = "normal"
                 continue
 
@@ -368,6 +415,7 @@ def main():
                     break
                 if val == "h":
                     state["mode"] = "help"
+                    state["help_page"] = 0
                     continue
                 if val == "r":
                     state["mode"] = "report"
