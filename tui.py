@@ -6,7 +6,6 @@ Three tabs, mirroring the original spec:
   3 浏览   one day at a time: edit / tag / delete, and manage profiles
 """
 import datetime as dt
-import os
 import sys
 
 from rich import box
@@ -17,37 +16,19 @@ from rich.table import Table
 from rich.text import Text
 
 import actions
+import commands
 import db
-import recurrence
+import fmt
 
 console = Console()
 
-WEEK_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+WEEK_CN = fmt.WEEK_CN
 TAB_NAMES = ["输入", "总览", "浏览"]
+HELP_LINES = commands.VERBS
 
-HELP_LINES = [
-    ("35 午饭 #餐饮 @同事", "记一笔支出"),
-    ("昨天 42 打车 #交通", "指定日期"),
-    ("b 50 每周三 12:00 咖啡 #餐饮", "建预算（周期可自定义）"),
-    ("b 1200 每月1号 房租 #生活", "月度预算"),
-    ("b 30 每2天 早餐", "间隔型预算"),
-    ("p 咖啡 18 #餐饮 12:00", "建行动模板"),
-    ("tag 12 +报销 -待定", "改标签"),
-]
-
-
-def money(v):
-    v = float(v or 0)
-    return ("-¥%.2f" % abs(v)) if v < 0 else ("¥%.2f" % v)
-
-
-def fmt_date(iso):
-    d = dt.date.fromisoformat(iso)
-    return "%s %s" % (iso, WEEK_CN[d.weekday()])
-
-
-def shift(iso, days):
-    return (dt.date.fromisoformat(iso) + dt.timedelta(days=days)).isoformat()
+money = fmt.money
+fmt_date = fmt.fmt_date
+shift = fmt.shift
 
 
 # ------------------------------------------------------------------- views
@@ -57,51 +38,70 @@ def header(state):
         active = i == state["tab"]
         tabs.append("  %s  " % name, style="bold reverse" if active else "dim")
         tabs.append(" ")
-    right = Text(state["today"], style="dim")
     grid = Table.grid(expand=True)
     grid.add_column(justify="left", ratio=1)
     grid.add_column(justify="right")
-    grid.add_row(Text("budget", style="bold cyan") + Text("  "), right)
-    return Panel(
-        Group(grid, Text(""), tabs),
-        border_style="grey30", box=box.ROUNDED, padding=(0, 1),
+    grid.add_row(
+        Text("budget", style="bold cyan"),
+        Text(fmt_date(state["date"]) if state["tab"] else state["today"], style="dim"),
     )
+    return Panel(Group(grid, Text(""), tabs),
+                 border_style="grey30", box=box.ROUNDED, padding=(0, 1))
+
+
+HINTS = {
+    0: "直接输入命令 · Tab 换页 · ↑↓ 历史 · Ctrl+H 帮助 · Ctrl+Q 退出",
+    1: "← → 换日 · Tab 换页 · Ctrl+R 报表 · Ctrl+T 今天 · Ctrl+H 帮助",
+    2: "← → 换日 · ↑↓ 选中 · Tab 换页 · Ctrl+E 改金额 · Ctrl+G 标签 · Ctrl+D 删除",
+}
 
 
 def footer(state, msg=""):
     if msg:
         style = "red" if state.get("msg_kind") == "err" else "green"
-        return Text(msg, style=style)
-    hints = {
-        0: "Enter 执行  ·  Tab 切换  ·  ?  帮助  ·  q 退出",
-        1: "← → 切换日期  ·  m 月度报表  ·  Tab 切换  ·  q 退出",
-        2: "← → 切换日期  ·  e 改金额  ·  t 打标签  ·  d 删除  ·  p 建模板  ·  q 退出",
-    }[state["tab"]]
-    return Text(hints, style="dim")
+        return Text("  " + msg, style=style)
+    return Text("  " + HINTS[state["tab"]], style="dim")
+
+
+def prompt_line(state):
+    """The always-visible command line."""
+    buf = state["buffer"]
+    return Text.assemble(
+        ("  › ", "bold cyan"),
+        (buf, "bold" if buf else "grey42"),
+        ("" if buf else "  输入命令，? 看帮助", "grey42"),
+    )
 
 
 def view_input(state, conn):
     hint = Text()
-    for label in ("b 预算", "p 模板", "昨天 改日期", "# 分类", "@ 标签", "? 帮助"):
+    for label in ("b 预算", "p 模板", "day 昨天", "# 分类", "@ 标签", "? 帮助"):
         hint.append("   %s   " % label, style="dim")
+    recent = actions.day_view(conn, state["date"])
+    recent_line = Text()
+    if recent["records"]:
+        recent_line.append("  今天 ", style="dim")
+        for r in recent["records"][:4]:
+            recent_line.append("%s %s  " % (money(r["amount"]), r["note"] or "—"), style="dim")
     return Group(
         Text(""),
-        Text("   › ", style="bold cyan")
-        + Text("35 午饭 #餐饮 @同事", style="grey42"),
+        Text(""),
+        prompt_line(state),
         Text(""),
         hint,
+        Text(""),
+        recent_line,
         Text(""),
     )
 
 
 def view_overview(state, conn):
-    day = actions.day_view(conn, state["ov_date"])
+    day = actions.day_view(conn, state["date"])
     blocks = []
 
     stats = Table.grid(expand=True, padding=(0, 2))
-    stats.add_column(justify="left")
-    stats.add_column(justify="left")
-    stats.add_column(justify="left")
+    for _ in range(3):
+        stats.add_column(justify="left")
     stats.add_row(
         Text.assemble(("当天支出\n", "dim"), (money(day["total"]), "bold")),
         Text.assemble(("预算计划\n", "dim"), (money(day["planned_total"]), "dim")),
@@ -109,13 +109,12 @@ def view_overview(state, conn):
     )
     blocks.append(stats)
 
-    # category breakdown
     by_cat = {}
     for r in day["records"]:
         key = r.get("category_name") or "未分类"
         by_cat[key] = by_cat.get(key, 0) + r["amount"]
     if by_cat:
-        t = Table(box=box.SIMPLE, expand=True, show_header=True, header_style="dim")
+        t = Table(box=box.SIMPLE, expand=True, header_style="dim")
         t.add_column("分类", width=12)
         t.add_column("金额", justify="right", width=12)
         t.add_column("占比", width=24)
@@ -127,7 +126,6 @@ def view_overview(state, conn):
     else:
         blocks.append(Text("  这一天没有支出记录", style="dim italic"))
 
-    # planned budgets for the day
     if day["planned"]:
         t = Table(box=box.SIMPLE, expand=True, header_style="dim")
         t.add_column("今日计划", width=16)
@@ -141,15 +139,14 @@ def view_overview(state, conn):
     else:
         blocks.append(Text("  今天没有预算计划", style="dim italic"))
 
-    return Panel(
-        Group(*blocks),
-        title="[bold]总览[/]  " + fmt_date(state["ov_date"]),
-        subtitle="m 查看月度报表", border_style="grey30", box=box.ROUNDED, padding=(1, 2),
-    )
+    return Panel(Group(*blocks),
+                 title="[bold]总览[/]  " + fmt_date(state["date"]),
+                 subtitle="Ctrl+R 月度报表", border_style="grey30",
+                 box=box.ROUNDED, padding=(1, 2))
 
 
 def view_browse(state, conn):
-    day = actions.day_view(conn, state["br_date"])
+    day = actions.day_view(conn, state["date"])
     body = []
 
     if day["records"]:
@@ -161,36 +158,31 @@ def view_browse(state, conn):
         t.add_column("标签", ratio=1)
         t.add_column("时间", width=6)
         for i, r in enumerate(day["records"]):
-            sel = i == state["br_sel"]
-            style = "reverse" if sel else ""
-            t.add_row(
-                str(r["id"]), money(r["amount"]), r["note"] or "—",
-                r.get("category_name") or "未分类",
-                " ".join("@" + x for x in r["tags"]) or "",
-                r["time"] or "",
-                style=style,
-            )
+            sel = i == state["sel"]
+            t.add_row(str(r["id"]), money(r["amount"]), r["note"] or "—",
+                      r.get("category_name") or "未分类",
+                      " ".join("@" + x for x in r["tags"]) or "",
+                      r["time"] or "", style="reverse" if sel else "")
         body.append(t)
+        body.append(Text("  改金额: edit <id> <金额>   改标签: tag <id> +标签   "
+                         "改备注: note <id> 文字", style="dim"))
     else:
         body.append(Text("  这一天还没有记录", style="dim italic"))
 
     if state["profiles"]:
-        p = Text()
-        p.append("\n行动模板  ", style="dim")
+        p = Text("\n行动模板  ", style="dim")
         for prof in state["profiles"]:
             p.append(" %s " % prof["name"], style="cyan")
             if prof.get("default_amount"):
                 p.append(money(prof["default_amount"]) + " ", style="dim")
         body.append(p)
     else:
-        body.append(Text("\n  还没有模板，按 p 创建", style="dim italic"))
+        body.append(Text("\n  还没有模板：p 咖啡 18 #餐饮", style="dim italic"))
 
-    return Panel(
-        Group(*body),
-        title="[bold]浏览[/]  " + fmt_date(state["br_date"]),
-        subtitle="e 改金额 · t 标签 · d 删除 · p 模板",
-        border_style="grey30", box=box.ROUNDED, padding=(1, 2),
-    )
+    return Panel(Group(*body),
+                 title="[bold]浏览[/]  " + fmt_date(state["date"]),
+                 subtitle="↑↓ 选中 · Ctrl+E 改金额 · Ctrl+G 标签 · Ctrl+D 删除",
+                 border_style="grey30", box=box.ROUNDED, padding=(1, 2))
 
 
 def view_report(state, conn):
@@ -223,11 +215,8 @@ def view_report(state, conn):
             ratio = b["actual"] / b["planned"] if b["planned"] else 0
             bar = "█" * max(0, min(10, int(ratio * 10)))
             color = "red" if b["actual"] > b["planned"] else "green"
-            t.add_row(
-                b["title"], b["rule_text"], str(b["count"]),
-                money(b["planned"]), money(b["actual"]),
-                Text(bar, style=color),
-            )
+            t.add_row(b["title"], b["rule_text"], str(b["count"]),
+                      money(b["planned"]), money(b["actual"]), Text(bar, style=color))
         blocks.append(t)
     else:
         blocks.append(Text("  这个月还没有预算", style="dim italic"))
@@ -238,12 +227,10 @@ def view_report(state, conn):
             c.append(" %s %s " % (cat["name"], money(cat["total"])), style="cyan")
         blocks.append(c)
 
-    return Panel(
-        Group(*blocks),
-        title="[bold]月度报表[/]  " + state["month"],
-        subtitle="← → 换月 · Esc 返回",
-        border_style="grey30", box=box.ROUNDED, padding=(1, 2),
-    )
+    return Panel(Group(*blocks),
+                 title="[bold]月度报表[/]  " + state["month"],
+                 subtitle="← → 换月 · Esc 返回", border_style="grey30",
+                 box=box.ROUNDED, padding=(1, 2))
 
 
 def help_panel():
@@ -251,40 +238,46 @@ def help_panel():
     t.add_column("命令", style="cyan", width=34)
     t.add_column("说明", style="dim")
     for cmd, desc in HELP_LINES:
+        if not cmd:
+            t.add_row("", "")
+            continue
         t.add_row(cmd, desc)
     extra = Text(
-        "\n周期写法：每天 / 每周三 / 每周一,三 / 每2天 / 每3周 / 每月1号 / 每年3月1号\n"
-        "时间写法：12:00 / 中午 / 晚上",
-        style="dim",
-    )
+        "\n裸字母只进命令行，不触发动作。快捷键一律用 Ctrl：\n"
+        "  Ctrl+H 帮助   Ctrl+Q 退出   Ctrl+R 报表   Ctrl+T 今天\n"
+        "  Ctrl+E 改金额  Ctrl+G 标签  Ctrl+D 删除  Ctrl+N 新模板\n"
+        "非字母键可直接按：← → ↑ ↓ 换日/选中，Tab 换页，Enter 执行，Esc 返回",
+        style="dim")
     return Panel(Group(t, extra), title="[bold]帮助[/]",
                  border_style="cyan", box=box.ROUNDED, padding=(1, 2))
 
 
 # -------------------------------------------------------------- rendering
 def render(state, conn):
+    console.clear()
     if state["mode"] == "help":
-        console.clear()
         console.print(header(state))
         console.print(help_panel())
-        console.print(footer(state, "任意键返回"))
+        console.print(Text("  任意键返回", style="dim"))
         return
 
-    console.clear()
     console.print(header(state))
     if state["mode"] == "report":
         console.print(view_report(state, conn))
-        console.print(footer(state))
-        return
-
-    view = [view_input, view_overview, view_browse][state["tab"]]
-    console.print(view(state, conn))
+    else:
+        console.print([view_input, view_overview, view_browse][state["tab"]](state, conn))
+        if state["tab"] != 0:
+            console.print(Text(""))
+            console.print(prompt_line(state))
     console.print(footer(state, state.get("message", "")))
 
 
 # ------------------------------------------------------------------- input
 def read_key():
-    """Read one keypress (or a whole line on Enter). Returns (kind, value)."""
+    """Read one keypress. Returns (kind, value).
+
+    kinds: char, up, down, left, right, tab, enter, esc, backspace, ctrl
+    """
     import termios
     import tty
 
@@ -294,47 +287,47 @@ def read_key():
         tty.setcbreak(fd)
         ch = sys.stdin.read(1)
         if ch == "\x1b":
-            seq = sys.stdin.read(2)
-            if seq == "[A":
-                return ("up", "")
-            if seq == "[B":
-                return ("down", "")
-            if seq == "[C":
-                return ("right", "")
-            if seq == "[D":
-                return ("left", "")
+            nxt = sys.stdin.read(1)
+            if nxt == "[":
+                seq = sys.stdin.read(1)
+                return ({"A": "up", "B": "down", "C": "right", "D": "left"}.get(seq, "esc"), "")
             return ("esc", "")
+        if ch in ("\r", "\n"):
+            return ("enter", "")
+        if ch == "\t":
+            return ("tab", "")
+        if ch in ("\x7f", "\x08"):
+            return ("backspace", "")
+        code = ord(ch)
+        if 1 <= code <= 26:          # Ctrl+A .. Ctrl+Z (Ctrl+C is code 3)
+            return ("ctrl", chr(code + 96))
         return ("char", ch)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def read_line(prompt="› ", default=""):
-    """Cooked-mode line input. Ctrl-C / Esc(empty) cancels."""
+def prompt(question, default=""):
     try:
-        return console.input("  [bold cyan]%s[/] " % prompt, default=default)
+        return console.input("  [bold cyan]%s[/] " % question, default=default)
     except (EOFError, KeyboardInterrupt):
         return None
-
-
-def ask(question, default=""):
-    ans = read_line(question, default)
-    return None if ans is None else ans
 
 
 # -------------------------------------------------------------------- main
 def main():
     db.init()
     conn = db.connect()
+    today = dt.date.today().isoformat()
     state = {
         "tab": 0,
         "mode": "normal",
-        "today": dt.date.today().isoformat(),
-        "ov_date": dt.date.today().isoformat(),
-        "br_date": dt.date.today().isoformat(),
+        "today": today,
+        "date": today,
         "month": dt.date.today().strftime("%Y-%m"),
-        "br_sel": 0,
+        "sel": 0,
         "buffer": "",
+        "history": [],
+        "hist": -1,
         "message": "",
         "msg_kind": "ok",
         "profiles": [],
@@ -343,11 +336,24 @@ def main():
     def refresh():
         state["profiles"] = db.list_profiles(conn)
 
+    def run(text):
+        """Execute a command string and fold the result into state."""
+        state["message"] = ""
+        try:
+            kind, msg = commands.execute(conn, text, state)
+            if kind == "quit":
+                return True
+            if msg:
+                state["message"], state["msg_kind"] = msg, "ok"
+            refresh()
+        except actions.ActionError as e:
+            state["message"], state["msg_kind"] = "✗ " + e.message, "err"
+        return False
+
     refresh()
 
     try:
         while True:
-            state["message"] = ""
             render(state, conn)
             kind, val = read_key()
 
@@ -355,103 +361,78 @@ def main():
                 state["mode"] = "normal"
                 continue
 
-            if state["mode"] == "report":
-                if kind == "left":
-                    y, m = (int(x) for x in state["month"].split("-"))
-                    state["month"] = (dt.date(y, m, 1) - dt.timedelta(days=1)).strftime("%Y-%m")
-                elif kind == "right":
-                    y, m = (int(x) for x in state["month"].split("-"))
-                    state["month"] = (dt.date(y, m, 28) + dt.timedelta(days=7)).strftime("%Y-%m")
-                elif kind in ("esc", "char"):
+            if kind == "ctrl":
+                if val == "c":
+                    break
+                if val == "q":
+                    break
+                if val == "h":
+                    state["mode"] = "help"
+                    continue
+                if val == "r":
+                    state["mode"] = "report"
+                    continue
+                if val == "t":
+                    run("today")
+                    continue
+                if val == "c":
                     state["mode"] = "normal"
+                    continue
+                if val == "n":
+                    state["tab"] = (state["tab"] + 1) % 3
+                    continue
+                if val in ("e", "g", "d"):
+                    run(_browse_shortcut(conn, state, val))
+                    continue
                 continue
 
-            if kind == "char" and val in ("q", "\x03"):
-                break
-            if kind == "char" and val == "\t":
+            if kind == "tab":
                 state["tab"] = (state["tab"] + 1) % 3
                 continue
-            if kind == "char" and val == "?":
-                state["mode"] = "help"
+
+            if kind == "left":
+                run("prev")
+                continue
+            if kind == "right":
+                run("next")
                 continue
 
-            if state["tab"] == 0:
-                # any keypress on the input tab opens the command line
-                if kind == "char" and val >= " ":
-                    text = read_line("›")
-                    if text and text.strip():
-                        try:
-                            res = actions.run_command(
-                                conn, text.strip(),
-                                today=dt.date.fromisoformat(state["today"]))
-                            state["message"], state["msg_kind"] = describe(res), "ok"
-                            refresh()
-                        except actions.ActionError as e:
-                            state["message"], state["msg_kind"] = "✗ " + e.message, "err"
+            if kind == "up":
+                if state["tab"] == 2:
+                    state["sel"] = max(0, state["sel"] - 1)
+                else:
+                    _history(state, -1)
+                continue
+            if kind == "down":
+                if state["tab"] == 2:
+                    day = actions.day_view(conn, state["date"])
+                    state["sel"] = min(max(0, len(day["records"]) - 1), state["sel"] + 1)
+                else:
+                    _history(state, +1)
                 continue
 
-            if state["tab"] == 1:
-                if kind == "left":
-                    state["ov_date"] = shift(state["ov_date"], -1)
-                elif kind == "right":
-                    state["ov_date"] = shift(state["ov_date"], 1)
-                elif kind == "char" and val == "m":
-                    state["mode"] = "report"
-                elif kind == "char" and val == "t":
-                    state["ov_date"] = state["today"]
+            if kind == "esc":
+                if state["mode"] == "report":
+                    state["mode"] = "normal"
+                state["buffer"] = ""
                 continue
 
-            if state["tab"] == 2:
-                day = actions.day_view(conn, state["br_date"])
-                n = len(day["records"])
-                if kind == "left":
-                    state["br_date"] = shift(state["br_date"], -1)
-                    state["br_sel"] = 0
-                elif kind == "right":
-                    state["br_date"] = shift(state["br_date"], 1)
-                    state["br_sel"] = 0
-                elif kind == "up":
-                    state["br_sel"] = max(0, state["br_sel"] - 1)
-                elif kind == "down":
-                    state["br_sel"] = min(max(0, n - 1), state["br_sel"] + 1)
-                elif kind == "char" and val == "t":
-                    state["br_date"] = state["today"]
-                    state["br_sel"] = 0
-                elif kind == "char" and val in ("e", "d", "g") and n:
-                    rec = day["records"][state["br_sel"]]
-                    if val == "d":
-                        db.delete_record(conn, rec["id"])
-                        state["message"] = "已删除 #%s" % rec["id"]
-                        state["br_sel"] = max(0, state["br_sel"] - 1)
-                    elif val == "e":
-                        ans = ask("新金额", str(rec["amount"]))
-                        if ans:
-                            try:
-                                actions.update_record(conn, rec["id"], {"amount": float(ans)})
-                                state["message"] = "已更新金额"
-                            except (ValueError, actions.ActionError) as e:
-                                state["message"], state["msg_kind"] = "✗ " + str(e), "err"
-                    elif val == "g":
-                        ans = ask("标签（逗号分隔，留空清空）",
-                                  ",".join(rec["tags"]))
-                        tags = [x.strip() for x in ans.replace("，", ",").split(",") if x.strip()]
-                        actions.update_record(conn, rec["id"], {"tags": tags})
-                        state["message"] = "标签已更新"
-                elif kind == "char" and val == "p":
-                    name = ask("模板名")
-                    if name:
-                        amt = ask("默认金额", "")
-                        cat = ask("分类", "")
-                        try:
-                            actions.create_profile(conn, {
-                                "name": name,
-                                "default_amount": float(amt) if amt else None,
-                                "category": cat or None,
-                            })
-                            state["message"] = "模板已创建"
-                            refresh()
-                        except (ValueError, actions.ActionError) as e:
-                            state["message"], state["msg_kind"] = "✗ " + str(e), "err"
+            if kind == "backspace":
+                state["buffer"] = state["buffer"][:-1]
+                continue
+
+            if kind == "enter":
+                text = state["buffer"].strip()
+                state["buffer"] = ""
+                state["hist"] = -1
+                if text:
+                    state["history"].append(text)
+                    if run(text):
+                        break
+                continue
+
+            if kind == "char":
+                state["buffer"] += val
                 continue
     except KeyboardInterrupt:
         pass
@@ -461,25 +442,38 @@ def main():
         console.print("[dim]bye[/]")
 
 
-def describe(res):
-    kind = res["kind"]
-    if kind == "record":
-        r = res["record"]
-        bits = ["✓ %s %s" % (money(r["amount"]), r["note"])]
-        if r.get("category_name"):
-            bits.append("#" + r["category_name"])
-        if r["tags"]:
-            bits.append(" ".join("@" + t for t in r["tags"]))
-        return "  ".join(bits)
-    if kind == "budget":
-        return "✓ 预算「%s」%s · %s" % (res["budget"]["title"],
-                                     money(res["budget"]["amount"]), res["rule_text"])
-    if kind == "profile":
-        return "✓ 模板「%s」已创建" % res["profile"]["name"]
-    if kind == "tag":
-        return "✓ 记录 %s 标签：%s" % (res["record"]["id"],
-                                    ", ".join(res["record"]["tags"]) or "（无）")
-    return "✓ 完成"
+def _history(state, direction):
+    hist = state["history"]
+    if not hist:
+        return
+    if state["hist"] == -1:
+        state["hist"] = len(hist) - 1 if direction < 0 else -1
+    else:
+        state["hist"] = max(0, min(len(hist) - 1, state["hist"] + direction))
+    state["buffer"] = hist[state["hist"]] if state["hist"] >= 0 else ""
+
+
+def _browse_shortcut(conn, state, key):
+    """Ctrl+E/G/D act on the selected browse row, expressed as commands."""
+    day = actions.day_view(conn, state["date"])
+    if not day["records"]:
+        raise actions.ActionError("这一天没有记录")
+    rec = day["records"][min(state["sel"], len(day["records"]) - 1)]
+
+    if key == "d":
+        return "del %s" % rec["id"]
+    if key == "e":
+        ans = prompt("新金额", str(rec["amount"]))
+        if ans is None:
+            return ""
+        return "edit %s %s" % (rec["id"], ans)
+    if key == "g":
+        ans = prompt("标签（逗号分隔，留空清空）", ",".join(rec["tags"]))
+        if ans is None:
+            return ""
+        tags = [x.strip() for x in ans.replace("，", ",").split(",") if x.strip()]
+        return "tags %s %s" % (rec["id"], ",".join(tags))
+    return ""
 
 
 if __name__ == "__main__":
