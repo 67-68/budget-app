@@ -1,15 +1,15 @@
-"""Rich TUI for the budget app.  python3 tui.py
+"""CLI for the budget app.  python3 tui.py
 
-Three tabs, mirroring the original spec:
-  1 输入   one command line, nothing else on screen
-  2 总览   the selected day, switchable, plus the monthly report
-  3 浏览   one day at a time: edit / tag / delete, and manage profiles
+Behaves like a shell rather than a full-screen TUI: output scrolls up in the
+transcript, and a fixed `budget>` prompt sits at the bottom. Typing repaints
+only that bottom bar, never the whole screen.
+
+Pages (Tab): input / overview / browse.
 """
 import datetime as dt
 import sys
 
 from rich import box
-from rich.align import Align
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
@@ -23,72 +23,84 @@ import fmt
 console = Console()
 
 WEEK_CN = fmt.WEEK_CN
-TAB_NAMES = ["输入", "总览", "浏览"]
-HELP_LINES = commands.VERBS
 
 money = fmt.money
 fmt_date = fmt.fmt_date
 shift = fmt.shift
 
 
-# ------------------------------------------------------------------- views
-def header(state):
-    tabs = Text()
-    for i, name in enumerate(TAB_NAMES):
-        active = i == state["tab"]
-        tabs.append("  %s  " % name, style="bold reverse" if active else "dim")
-        tabs.append(" ")
-    grid = Table.grid(expand=True)
-    grid.add_column(justify="left", ratio=1)
-    grid.add_column(justify="right")
-    grid.add_row(
-        Text("budget", style="bold cyan"),
-        Text(fmt_date(state["date"]) if state["tab"] else state["today"], style="dim"),
-    )
-    return Panel(Group(grid, Text(""), tabs),
-                 border_style="grey30", box=box.ROUNDED, padding=(0, 1))
+# ------------------------------------------------------------------ layout
+# CLI model: completed output scrolls up in the transcript; the prompt bar is
+# pinned to the bottom and repainted in place (no full-screen redraw).
+BAR_HEIGHT = 3          # separator + hint line + prompt line
 
 
-HINTS = {
-    0: "直接输入命令 · Ctrl+字母 执行快捷键 · Tab 换页 · ↑↓ 历史 · Ctrl+Q 退出",
-    1: "← → 换日 · Tab 换页 · Ctrl+R 报表 · Ctrl+T 今天 · Ctrl+H 帮助",
-    2: "← → 换日 · ↑↓ 选中 · Tab 换页 · Ctrl+E 改金额 · Ctrl+G 标签 · Ctrl+D 删除",
-}
+class Screen:
+    """Owns the terminal: scrolling transcript + a fixed bottom bar."""
+
+    def __init__(self, console_):
+        self.console = console_
+        self.bar_lines = 0
+
+    def _write(self, text):
+        self.console.file.write(text)
+        self.console.file.flush()
+
+    def clear_bar(self):
+        if self.bar_lines:
+            self._write("\033[%dA\r\033[0J" % self.bar_lines)
+            self.bar_lines = 0
+
+    def draw_bar(self, renderable):
+        """Repaint the bottom bar. `renderable` is a rich renderable."""
+        self.clear_bar()
+        with self.console.capture() as cap:
+            self.console.print(renderable, end="")
+        text = cap.get()
+        self._write(text)
+        self.bar_lines = text.count("\n") + (0 if text.endswith("\n") else 1)
+
+    def emit(self, renderable):
+        """Append finished output to the transcript (above the bar)."""
+        self.clear_bar()
+        self.console.print(renderable)
+        self.bar_lines = 0
 
 
-def footer(state, msg=""):
-    if msg:
-        style = "red" if state.get("msg_kind") == "err" else "green"
-        return Text("  " + msg, style=style)
-    return Text("  " + HINTS[state["tab"]], style="dim")
+def hint_line(state):
+    """The command-word row, CLI style."""
+    words = ("b", "p", "day", "type", "tag", "use", "report", "help")
+    t = Text("  ", style="")
+    for i, w in enumerate(words):
+        if i:
+            t.append("  ", style="dim")
+        t.append(w, style="cyan")
+    return t
 
 
-def prompt_line(state):
-    """The always-visible command line:  budget> <buffer>|"""
+def prompt_bar(state):
     buf = state["buffer"]
-    return Text.assemble(
+    line = Text.assemble(
         ("  budget", "bold cyan"),
         ("> ", "bold cyan"),
-        (buf, "bold"),
+        (buf, ""),
         ("\u258f", "cyan"),
+    )
+    return Group(
+        Text("  " + "\u2500" * max(10, console.width - 4), style="grey30"),
+        hint_line(state),
+        line,
     )
 
 
 def view_input(state, conn):
-    hint = Text("  " + "  ".join(("b 预算", "p 模板", "day 昨天",
-                                  "# 分类", "@ 标签", "? 帮助")), style="dim")
-
-    parts = [Text(""), prompt_line(state), Text(""), hint]
-
-    # a single line of the shown day's records, only when there are any
-    recent = actions.day_view(conn, state["date"])
-    if recent["records"]:
-        line = Text("  " + fmt_date(state["date"])[:10] + "  ", style="dim")
-        for r in recent["records"][:4]:
-            line.append("%s %s  " % (money(r["amount"]), r["note"] or "—"), style="dim")
-        parts += [Text(""), line, Text("")]
-
-    return Group(*parts)
+    """Input tab has no body of its own; the bar carries the interaction."""
+    day = actions.day_view(conn, state["date"])
+    line = Text("  " + fmt_date(state["date"]), style="dim")
+    if day["records"]:
+        line.append("   ", style="")
+        line.append("%d 笔  %s" % (len(day["records"]), money(day["total"])), style="dim")
+    return Group(line)
 
 
 def view_overview(state, conn):
@@ -293,22 +305,13 @@ def help_page(state):
 
 
 # -------------------------------------------------------------- rendering
-def render(state, conn):
-    console.clear()
+def current_view(state, conn):
+    """The renderable for the active tab (or report/help overlay)."""
     if state["mode"] == "help":
-        console.print(header(state))
-        console.print(help_page(state))
-        return
-
-    console.print(header(state))
+        return help_page(state)
     if state["mode"] == "report":
-        console.print(view_report(state, conn))
-    else:
-        console.print([view_input, view_overview, view_browse][state["tab"]](state, conn))
-        if state["tab"] != 0:
-            console.print(Text(""))
-            console.print(prompt_line(state))
-    console.print(footer(state, state.get("message", "")))
+        return view_report(state, conn)
+    return [view_input, view_overview, view_browse][state["tab"]](state, conn)
 
 
 # ------------------------------------------------------------------- input
@@ -367,75 +370,96 @@ def main():
         "buffer": "",
         "history": [],
         "hist": -1,
-        "message": "",
-        "msg_kind": "ok",
         "profiles": [],
         "help_page": 0,
     }
 
+    screen = Screen(console)
+
     def refresh():
         state["profiles"] = db.list_profiles(conn)
 
+    def show(renderable=None):
+        """Print the active view into the transcript (CLI: output accumulates)."""
+        screen.emit(renderable if renderable is not None else current_view(state, conn))
+
     def run(text):
-        """Execute a command string and fold the result into state."""
-        state["message"] = ""
+        """Execute one command; print its result into the transcript."""
+        screen.clear_bar()
+        console.print(Text("  budget> ", style="bold cyan") + Text(text))
         try:
             kind, msg = commands.execute(conn, text, state)
             if kind == "quit":
                 return True
-            if msg:
-                state["message"], state["msg_kind"] = msg, "ok"
             refresh()
+            if kind == "help":
+                show()
+                return False
+            if msg:
+                console.print(Text("  " + msg, style="green" if not msg.startswith("✗") else "red"))
+            show()
         except actions.ActionError as e:
-            state["message"], state["msg_kind"] = "✗ " + e.message, "err"
+            console.print(Text("  ✗ " + e.message, style="red"))
         return False
 
     refresh()
 
+    console.clear()
+    console.print(Text("  budget", style="bold cyan") +
+                  Text("  输入 ? 看帮助，Tab 切换页面", style="dim"))
+    console.print(Text(""))
+    show()
+
     try:
         while True:
-            render(state, conn)
+            screen.draw_bar(prompt_bar(state))
             kind, val = read_key()
 
             if state["mode"] == "help":
                 pages = max(1, (len(commands.SCENARIOS) + 1) // 2)
                 if kind == "left":
                     state["help_page"] = (state.get("help_page", 0) - 1) % pages
+                    show(help_page(state))
                     continue
                 if kind == "right":
                     state["help_page"] = (state.get("help_page", 0) + 1) % pages
+                    show(help_page(state))
                     continue
                 state["mode"] = "normal"
+                show()
                 continue
 
             if kind == "ctrl":
-                if val == "c":
-                    break
-                if val == "q":
+                if val in ("c", "q"):
                     break
                 if val == "h":
                     state["mode"] = "help"
                     state["help_page"] = 0
+                    show()
                     continue
                 if val == "r":
                     state["mode"] = "report"
+                    show()
                     continue
                 if val == "t":
                     run("today")
                     continue
-                if val == "c":
-                    state["mode"] = "normal"
-                    continue
                 if val == "n":
                     state["tab"] = (state["tab"] + 1) % 3
+                    show()
                     continue
                 if val in ("e", "g", "d"):
-                    run(_browse_shortcut(conn, state, val))
+                    try:
+                        run(_browse_shortcut(conn, state, val))
+                    except actions.ActionError as e:
+                        screen.clear_bar()
+                        console.print(Text("  ✗ " + e.message, style="red"))
                     continue
                 continue
 
             if kind == "tab":
                 state["tab"] = (state["tab"] + 1) % 3
+                show()
                 continue
 
             if kind == "left":
@@ -462,6 +486,7 @@ def main():
             if kind == "esc":
                 if state["mode"] == "report":
                     state["mode"] = "normal"
+                    show()
                 state["buffer"] = ""
                 continue
 
@@ -477,6 +502,8 @@ def main():
                     state["history"].append(text)
                     if run(text):
                         break
+                else:
+                    show()
                 continue
 
             if kind == "char":
@@ -485,9 +512,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        screen.clear_bar()
         conn.close()
-        console.clear()
-        console.print("[dim]bye[/]")
+        console.print(Text("  bye", style="dim"))
 
 
 def _history(state, direction):
